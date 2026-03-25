@@ -98,14 +98,14 @@ func TestCache_Set_SetsExpiration(t *testing.T) {
 		t.Fatal("item not found in cache after Set")
 	}
 
-	wantLow := before.Add(c.DiskExpiration).Unix()
-	wantHigh := after.Add(c.DiskExpiration).Unix()
+	wantLow := before.Add(c.DiskExpiration).UnixNano()
+	wantHigh := after.Add(c.DiskExpiration).UnixNano()
 	if item.DiskExpiration < wantLow || item.DiskExpiration > wantHigh {
 		t.Errorf("DiskExpiration %d not in [%d, %d]", item.DiskExpiration, wantLow, wantHigh)
 	}
 
-	wantLow = before.Add(c.MemoryExpiration).Unix()
-	wantHigh = after.Add(c.MemoryExpiration).Unix()
+	wantLow = before.Add(c.MemoryExpiration).UnixNano()
+	wantHigh = after.Add(c.MemoryExpiration).UnixNano()
 	if item.MemoryExpiration < wantLow || item.MemoryExpiration > wantHigh {
 		t.Errorf("MemoryExpiration %d not in [%d, %d]", item.MemoryExpiration, wantLow, wantHigh)
 	}
@@ -210,7 +210,7 @@ func TestItem_Read_MemoryValid(t *testing.T) {
 
 	item := c.items["key"]
 	// Ensure MemoryExpiration is a normal future timestamp (not -1).
-	item.MemoryExpiration = time.Now().Add(time.Hour).Unix()
+	item.MemoryExpiration = time.Now().Add(time.Hour).UnixNano()
 
 	// Corrupt the backing file; Read must NOT fall through to the file.
 	if err := item.Handle.Truncate(0); err != nil {

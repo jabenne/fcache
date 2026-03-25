@@ -5,13 +5,19 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
 )
 
 type Cache struct {
-	items map[string]*Item
-	mu    sync.Mutex
+	*cache
+}
+
+type cache struct {
+	items   map[string]*Item
+	mu      sync.Mutex
+	janitor *janitor
 
 	MemoryExpiration time.Duration
 	DiskExpiration   time.Duration
@@ -24,15 +30,31 @@ func New(dir string, diskExpiration, memoryExpiration time.Duration) (*Cache, er
 		return nil, fmt.Errorf("failed to create cache directory: %w", err)
 	}
 
-	return &Cache{
+	j := &janitor{
+		Interval: time.Second,
+		stopC:    make(chan struct{}),
+	}
+
+	c := &cache{
 		items:            make(map[string]*Item),
 		Dir:              dir,
 		DiskExpiration:   diskExpiration,
 		MemoryExpiration: memoryExpiration,
-	}, nil
+		janitor:          j,
+	}
+
+	wrapper := &Cache{cache: c}
+
+	go j.run(c)
+	runtime.SetFinalizer(wrapper, func(w *Cache) {
+		close(w.janitor.stopC)
+	})
+
+	return wrapper, nil
+
 }
 
-func (c *Cache) Get(k string) ([]byte, error) {
+func (c *cache) Get(k string) ([]byte, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -48,7 +70,7 @@ func (c *Cache) Get(k string) ([]byte, error) {
 	}
 }
 
-func (c *Cache) Set(k string, data []byte) error {
+func (c *cache) Set(k string, data []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -65,8 +87,8 @@ func (c *Cache) Set(k string, data []byte) error {
 
 		now := time.Now()
 		c.items[k] = &Item{
-			DiskExpiration:   now.Add(c.DiskExpiration).Unix(),
-			MemoryExpiration: now.Add(c.MemoryExpiration).Unix(),
+			DiskExpiration:   now.Add(c.DiskExpiration).UnixNano(),
+			MemoryExpiration: now.Add(c.MemoryExpiration).UnixNano(),
 			Data:             data,
 			Handle:           file,
 		}
@@ -75,7 +97,7 @@ func (c *Cache) Set(k string, data []byte) error {
 	return nil
 }
 
-func (c *Cache) replaceFile(f *os.File, data []byte) error {
+func (c *cache) replaceFile(f *os.File, data []byte) error {
 	if _, err := f.Write(data); err != nil {
 		return fmt.Errorf("failed to write data to file: %w", err)
 	}
@@ -83,7 +105,7 @@ func (c *Cache) replaceFile(f *os.File, data []byte) error {
 	return nil
 }
 
-func (c *Cache) createFile(name string, data []byte) (*os.File, error) {
+func (c *cache) createFile(name string, data []byte) (*os.File, error) {
 	f, err := os.Create(filepath.Join(c.Dir, name))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create file: %w", err)
@@ -94,6 +116,25 @@ func (c *Cache) createFile(name string, data []byte) (*os.File, error) {
 	}
 
 	return f, nil
+}
+
+func (c *cache) deleteExpired() {
+	now := time.Now().UnixNano()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for k, v := range c.items {
+		if v.Data != nil && now > v.MemoryExpiration {
+			v.Data = nil
+		}
+
+		if now > v.DiskExpiration {
+			filePath := v.Handle.Name()
+			v.Handle.Close()
+			os.Remove(filePath)
+			delete(c.items, k)
+		}
+	}
 }
 
 type Item struct {
@@ -117,4 +158,22 @@ func (i *Item) Read() ([]byte, error) {
 
 func (i *Item) readFile() ([]byte, error) {
 	return io.ReadAll(i.Handle)
+}
+
+type janitor struct {
+	Interval time.Duration
+	stopC    chan struct{}
+}
+
+func (j *janitor) run(c *cache) {
+	ticker := time.NewTicker(j.Interval)
+	for {
+		select {
+		case <-ticker.C:
+			c.deleteExpired()
+		case <-j.stopC:
+			ticker.Stop()
+			return
+		}
+	}
 }
