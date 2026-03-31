@@ -5,16 +5,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sync"
 	"time"
 )
 
 type Cache struct {
-	*cache
-}
-
-type cache struct {
 	items   map[string]*Item
 	mu      sync.Mutex
 	janitor *janitor
@@ -35,7 +30,7 @@ func New(dir string, diskExpiration, memoryExpiration time.Duration) (*Cache, er
 		stopC:    make(chan struct{}),
 	}
 
-	c := &cache{
+	c := &Cache{
 		items:            make(map[string]*Item),
 		Dir:              dir,
 		DiskExpiration:   diskExpiration,
@@ -43,18 +38,17 @@ func New(dir string, diskExpiration, memoryExpiration time.Duration) (*Cache, er
 		janitor:          j,
 	}
 
-	wrapper := &Cache{cache: c}
-
 	go j.run(c)
-	runtime.SetFinalizer(wrapper, func(w *Cache) {
-		close(w.janitor.stopC)
-	})
 
-	return wrapper, nil
+	return c, nil
 
 }
 
-func (c *cache) Get(k string) ([]byte, error) {
+func (c *Cache) Close() {
+	c.janitor.close()
+}
+
+func (c *Cache) Get(k string) ([]byte, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -70,7 +64,7 @@ func (c *cache) Get(k string) ([]byte, error) {
 	}
 }
 
-func (c *cache) Set(k string, data []byte) error {
+func (c *Cache) Set(k string, data []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -97,7 +91,7 @@ func (c *cache) Set(k string, data []byte) error {
 	return nil
 }
 
-func (c *cache) replaceFile(f *os.File, data []byte) error {
+func (c *Cache) replaceFile(f *os.File, data []byte) error {
 	if _, err := f.Write(data); err != nil {
 		return fmt.Errorf("failed to write data to file: %w", err)
 	}
@@ -105,7 +99,7 @@ func (c *cache) replaceFile(f *os.File, data []byte) error {
 	return nil
 }
 
-func (c *cache) createFile(name string, data []byte) (*os.File, error) {
+func (c *Cache) createFile(name string, data []byte) (*os.File, error) {
 	f, err := os.Create(filepath.Join(c.Dir, name))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create file: %w", err)
@@ -118,7 +112,7 @@ func (c *cache) createFile(name string, data []byte) (*os.File, error) {
 	return f, nil
 }
 
-func (c *cache) deleteExpired() {
+func (c *Cache) deleteExpired() {
 	now := time.Now().UnixNano()
 
 	c.mu.Lock()
@@ -163,17 +157,25 @@ func (i *Item) readFile() ([]byte, error) {
 type janitor struct {
 	Interval time.Duration
 	stopC    chan struct{}
+	once     sync.Once
 }
 
-func (j *janitor) run(c *cache) {
+func (j *janitor) run(c *Cache) {
 	ticker := time.NewTicker(j.Interval)
+	defer ticker.Stop()
+
 	for {
 		select {
 		case <-ticker.C:
 			c.deleteExpired()
 		case <-j.stopC:
-			ticker.Stop()
 			return
 		}
 	}
+}
+
+func (j *janitor) close() {
+	j.once.Do(func() {
+		close(j.stopC)
+	})
 }
